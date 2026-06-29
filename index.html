@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 内容生成工作台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Claude Code Skill Online Prototype</p>
+          <h1>AI 内容生成工作台</h1>
+        </div>
+        <div class="topbar-actions">
+          <button class="primary-button" id="mainActionButton" type="button">开始当前任务</button>
+        </div>
+      </header>
+
+      <section class="workspace-grid">
+        <aside class="panel settings-panel" aria-label="生成设置">
+          <section class="section-block">
+            <div class="section-heading">
+              <h2>生成设置</h2>
+              <p>内容结构由系统自动判断，前端只保留必要生成偏好。</p>
+            </div>
+
+            <div class="form-grid single">
+              <label>
+                目标平台
+                <select id="targetPlatformInput">
+                  <option>小红书</option>
+                </select>
+              </label>
+              <label>
+                页数设置
+                <select id="pageCountInput">
+                  <option selected>自动</option>
+                  <option>3 页</option>
+                  <option>5 页</option>
+                  <option>7 页</option>
+                </select>
+              </label>
+            </div>
+            <p class="field-help">
+              后端会自动判断内容结构，可能同时命中教程、方法论、行动清单或分析类。
+            </p>
+          </section>
+
+          <section class="section-block">
+            <div class="section-heading">
+              <h2>卡片主题</h2>
+              <p>封面和内页均保留筛选后的 6 个风格。</p>
+            </div>
+
+            <div class="theme-stack">
+              <div>
+                <div class="subheading">封面主题</div>
+                <div class="theme-grid" id="coverThemeGroup"></div>
+              </div>
+              <div>
+                <div class="subheading">内页主题</div>
+                <div class="theme-grid" id="innerThemeGroup"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="section-block">
+            <div class="section-heading">
+              <h2>上下文设置</h2>
+              <p>选填，用于后续价值评估和改写方向，不填则由系统按素材判断。</p>
+            </div>
+            <div class="form-grid single">
+              <label>
+                内容领域 <span class="optional-mark">选填</span>
+                <input id="domainInput" type="text" placeholder="例如：职场成长 / 护肤成分 / AI工具" />
+              </label>
+              <label>
+                目标受众 <span class="optional-mark">选填</span>
+                <input id="audienceInput" type="text" placeholder="例如：职场新人 / 市场负责人 / 小微商家" />
+              </label>
+            </div>
+          </section>
+        </aside>
+
+        <section class="panel material-panel" aria-label="素材中心">
+          <section class="section-block first">
+            <div class="section-heading">
+              <h2>素材中心</h2>
+              <p>关键词抓取先沉淀素材；选中素材或即时输入后再生成卡片。</p>
+            </div>
+
+            <div class="segmented material-tabs" role="tablist" aria-label="素材中心">
+              <button class="segment active" data-material-tab="todo" type="button">待改写</button>
+              <button class="segment" data-material-tab="done" type="button">已改写</button>
+              <button class="segment" data-material-tab="fetch" type="button">关键词抓取</button>
+              <button class="segment" data-material-tab="instant" type="button">即时输入</button>
+            </div>
+
+            <div class="material-pane active" data-material-pane="todo">
+              <div class="toolbar-row">
+                <input id="materialSearchInput" type="search" placeholder="搜索标题 / 主题" />
+                <select id="materialFilterInput" aria-label="素材筛选">
+                  <option>全部素材</option>
+                  <option>高价值</option>
+                  <option>近期热点</option>
+                  <option>长尾话题</option>
+                </select>
+              </div>
+              <div class="material-list" id="todoMaterialList">
+                <div class="empty-state compact">暂无待改写素材。可以先执行关键词抓取。</div>
+              </div>
+              <div class="pagination" id="todoPagination"></div>
+            </div>
+
+            <div class="material-pane" data-material-pane="done">
+              <div class="material-list" id="doneMaterialList">
+                <div class="empty-state compact">暂无已改写素材。生成卡片后会自动归入这里。</div>
+              </div>
+              <div class="pagination" id="donePagination"></div>
+            </div>
+
+            <div class="material-pane" data-material-pane="fetch">
+              <label for="keywordInput">关键词</label>
+              <input id="keywordInput" type="text" placeholder="例如：职场新人效率提升" />
+              <div class="inline-fields">
+                <label>
+                  平台来源
+                  <select id="platformInput">
+                    <option>微信公众号</option>
+                    <option>小红书</option>
+                    <option>X / Twitter</option>
+                    <option>多平台</option>
+                  </select>
+                </label>
+                <label>
+                  抓取数量
+                  <select id="fetchCountInput">
+                    <option>3 篇</option>
+                    <option selected>5 篇</option>
+                    <option>10 篇</option>
+                  </select>
+                </label>
+              </div>
+              <button class="primary-button full-width" id="fetchMaterialsButton" type="button">抓取并沉淀素材</button>
+              <p class="field-help">该流程只写入素材库，不直接生成图文卡片。</p>
+            </div>
+
+            <div class="material-pane" data-material-pane="instant">
+              <div class="segmented instant-tabs" role="tablist" aria-label="即时输入方式">
+                <button class="segment active" data-instant-tab="link" type="button">链接解析</button>
+                <button class="segment" data-instant-tab="text" type="button">粘贴正文</button>
+              </div>
+
+              <div class="instant-pane active" data-instant-pane="link">
+                <label for="linkInput">文章链接</label>
+                <input id="linkInput" type="url" placeholder="https://example.com/article" />
+                <p class="field-help">链接会先解析正文，再进入价值评估和图文生成。</p>
+              </div>
+
+              <div class="instant-pane" data-instant-pane="text">
+                <label for="articleInput">文章正文</label>
+                <textarea id="articleInput" placeholder="把长文、摘要或 Markdown 粘贴到这里"></textarea>
+              </div>
+
+              <button class="primary-button full-width" id="instantGenerateButton" type="button">即时生成卡片</button>
+            </div>
+          </section>
+
+          <section class="compact-task" aria-label="当前任务进度">
+            <div class="compact-task-header">
+              <div>
+                <p class="eyebrow">当前任务</p>
+                <h2 id="compactTaskTitle">未选择素材</h2>
+              </div>
+              <span id="compactTaskBadge">等待开始</span>
+            </div>
+            <p id="flowDescription">选择待改写素材、执行关键词抓取，或使用即时输入开始。</p>
+            <div class="compact-steps" id="pipelineList"></div>
+            <div class="compact-summary">
+              <span id="taskSummary">任务：等待开始</span>
+              <span id="complianceSummary">合规：未执行</span>
+              <span id="cardSummary">卡片：待生成</span>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel result-panel" aria-label="输出结果">
+          <div class="section-heading">
+            <h2>输出结果</h2>
+            <p>生成完成后可复制发布文案，或导出 Markdown 发布包。</p>
+            <div class="result-badges">
+              <span id="resultSourceBadge">来源：未选择</span>
+              <span id="resultComplianceBadge">合规：待执行</span>
+            </div>
+          </div>
+
+          <div class="result-tabs" role="tablist" aria-label="结果视图">
+            <button class="result-tab active" data-result-tab="copy" type="button">文案</button>
+            <button class="result-tab" data-result-tab="cards" type="button">卡片</button>
+            <button class="result-tab" data-result-tab="export" type="button">导出</button>
+          </div>
+
+          <div class="result-pane active" data-result-pane="copy">
+            <label for="titleOutput">推荐标题</label>
+            <input id="titleOutput" readonly value="等待生成" />
+
+            <label for="summaryOutput">正文概述</label>
+            <textarea id="summaryOutput" readonly>等待生成</textarea>
+
+            <label>推荐标签</label>
+            <div class="tag-list" id="tagOutput">
+              <span>等待生成</span>
+            </div>
+          </div>
+
+          <div class="result-pane" data-result-pane="cards">
+            <div class="card-preview-grid" id="cardPreviewGrid">
+              <div class="empty-state">卡片预览会在生成后显示。</div>
+            </div>
+          </div>
+
+          <div class="result-pane" data-result-pane="export">
+            <div class="export-actions">
+              <button class="primary-button" id="copyButton" type="button">复制发布文案</button>
+              <button class="ghost-button" id="downloadButton" type="button">下载 Markdown</button>
+            </div>
+            <section class="edit-links">
+              <h3>md2card 在线编辑链接</h3>
+              <div id="editLinkList">
+                <div class="empty-state compact">真实接入 md2card 后，每页会在这里显示在线编辑链接。</div>
+              </div>
+            </section>
+            <pre id="exportPreview">等待生成发布包。</pre>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog class="image-lightbox" id="imageLightbox">
+      <button class="lightbox-close" id="lightboxCloseButton" type="button">关闭</button>
+      <img id="lightboxImage" alt="放大查看卡片" />
+    </dialog>
+
+    <dialog class="confirm-dialog" id="unreplacedLinkDialog">
+      <h3>当前链接未替换</h3>
+      <p>
+        这篇素材还不是微信公众号永久原文链接。继续生成时，系统可能只能基于已沉淀的标题、摘要或抓取文本改写，内容完整度可能受影响。
+      </p>
+      <div class="dialog-actions">
+        <button class="ghost-button" id="cancelUnreplacedButton" type="button">取消</button>
+        <button class="ghost-button" id="manualReplaceFromDialogButton" type="button">手动替换</button>
+        <button class="primary-button" id="continueUnreplacedButton" type="button">继续生成</button>
+      </div>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
