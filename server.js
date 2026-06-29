@@ -10,8 +10,8 @@ const PORT = Number(process.env.PORT || 5177);
 const ROOT = __dirname;
 const WORKSPACE_ROOT = path.resolve(ROOT, "..");
 const MATERIAL_OUTPUT_DIR = path.join(WORKSPACE_ROOT, "skills", "文章抓取筛选", "output");
-const WECHAT_SCRIPT_DIR = path.join(WORKSPACE_ROOT, "skills", "文章抓取筛选", "scripts");
-const WECHAT_SCRIPT = path.join(WECHAT_SCRIPT_DIR, "search_wechat.js");
+const PROJECT_WECHAT_SCRIPT = path.join(ROOT, "scripts", "search_wechat.js");
+const LEGACY_WECHAT_SCRIPT = path.join(WORKSPACE_ROOT, "skills", "文章抓取筛选", "scripts", "search_wechat.js");
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -693,12 +693,17 @@ async function resolvePermanentUrl(startUrl) {
 }
 
 function runWechatSearch({ keyword, count }) {
-  if (!fs.existsSync(WECHAT_SCRIPT)) {
+  const scriptPath = fs.existsSync(PROJECT_WECHAT_SCRIPT)
+    ? PROJECT_WECHAT_SCRIPT
+    : fs.existsSync(LEGACY_WECHAT_SCRIPT)
+      ? LEGACY_WECHAT_SCRIPT
+      : "";
+  if (!scriptPath) {
     return Promise.reject(new Error("search_wechat.js not found"));
   }
 
   try {
-    const { searchWechatArticles } = require(WECHAT_SCRIPT);
+    const { searchWechatArticles } = require(scriptPath);
     return searchWechatArticles(keyword, count || 5).then((articles) => ({
       query: keyword,
       total: articles.length,
