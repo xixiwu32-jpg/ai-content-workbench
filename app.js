@@ -68,8 +68,8 @@ const flows = {
       ["fetch", "抓取文章", "根据关键词和平台获取候选文章"],
       ["rough", "粗筛", "过滤无效链接、低字数和不匹配主题"],
       ["value", "价值评估", "判断是否值得写入素材库"],
-      ["dedupe", "去重", "用标题相似度过滤重复文章"],
-      ["store", "写入素材库", "沉淀为待改写素材"],
+      ["dedupe", "去重", "过滤重复文章"],
+      ["output", "输出结果", "刷新列表并展示本次抓取摘要"],
     ],
   },
 };
@@ -80,7 +80,8 @@ const state = {
   coverTheme: "darktech",
   innerTheme: "apple",
   materials: [],
-  rewritten: [],
+  pendingPublish: [],
+  published: [],
   selectedMaterialId: null,
   activeFlow: "library",
   output: null,
@@ -89,7 +90,8 @@ const state = {
   pageSize: 5,
   pages: {
     todo: 1,
-    done: 1,
+    pendingPublish: 1,
+    published: 1,
   },
 };
 
@@ -127,7 +129,8 @@ async function loadMaterialsFromBackend({ silent = false } = {}) {
   try {
     const data = await apiRequest("/api/materials");
     state.materials = normalizeBackendMaterials(data.todo || []);
-    state.rewritten = normalizeBackendMaterials(data.done || []);
+    state.pendingPublish = normalizeBackendMaterials(data.pendingPublish || data.rewritten || data.done || []);
+    state.published = normalizeBackendMaterials(data.published || []);
     renderMaterialLists();
     if (silent) return;
     if (data.cloud?.enabled && !data.cloud.ok) {
@@ -154,6 +157,7 @@ function normalizeBackendMaterials(items) {
     folderName: item.folderName || "",
     storage: item.storage || "local",
     sourceType: item.sourceType || "",
+    status: item.status || "todo",
   }));
 }
 
@@ -251,6 +255,12 @@ function bindEvents() {
       return;
     }
 
+    const publishButton = event.target.closest("[data-publish-material]");
+    if (publishButton) {
+      confirmPublishMaterial(publishButton.dataset.publishMaterial);
+      return;
+    }
+
     const viewButton = event.target.closest("[data-view-original]");
     if (viewButton) {
       viewOriginal(viewButton.dataset.viewOriginal);
@@ -310,6 +320,12 @@ function bindEvents() {
     closeUnreplacedLinkDialog();
     runLibraryPipelineConfirmed();
   });
+  $("#confirmPublishButton").addEventListener("click", () => {
+    const id = $("#publishConfirmDialog").dataset.materialId;
+    closePublishConfirmDialog();
+    if (id) publishMaterial(id);
+  });
+  $("#cancelPublishButton").addEventListener("click", closePublishConfirmDialog);
   $("#materialSearchInput").addEventListener("input", () => {
     resetMaterialPages();
     renderMaterialLists();
@@ -331,12 +347,13 @@ function switchMaterialTab(tab) {
 
   if (tab === "fetch") renderFlow("fetch");
   if (tab === "instant") renderFlow("instant");
-  if (tab === "todo" || tab === "done") renderFlow("library");
+  if (tab === "todo" || tab === "pendingPublish" || tab === "published") renderFlow("library");
 
   if (tab === "fetch") setCompactTask("关键词抓取", "等待开始");
   if (tab === "instant") setCompactTask("即时输入", "等待开始");
   if (tab === "todo") setCompactTask(getSelectedMaterial()?.title || "未选择素材", "等待开始");
-  if (tab === "done") setCompactTask("已改写素材", "仅查看");
+  if (tab === "pendingPublish") setCompactTask("待发布素材", "仅查看");
+  if (tab === "published") setCompactTask("已发布素材", "仅查看");
 }
 
 function setCompactTask(title, badge = "等待开始") {
@@ -389,6 +406,41 @@ function finishFlowProgress(flowKey) {
   renderFlow(flowKey, null, flows[flowKey].steps.map(([key]) => key));
 }
 
+function startPacedProgress(flowKey, intervalMs = 2600) {
+  const steps = flows[flowKey].steps;
+  let activeIndex = 0;
+  const finalIndex = steps.length - 1;
+
+  renderFlow(flowKey, steps[activeIndex][0], []);
+  const timer = window.setInterval(() => {
+    if (activeIndex >= finalIndex - 1) return;
+    activeIndex += 1;
+    renderFlow(
+      flowKey,
+      steps[activeIndex][0],
+      steps.slice(0, activeIndex).map(([key]) => key),
+    );
+  }, intervalMs);
+
+  return {
+    showFinalRunning() {
+      window.clearInterval(timer);
+      renderFlow(
+        flowKey,
+        steps[finalIndex][0],
+        steps.slice(0, finalIndex).map(([key]) => key),
+      );
+    },
+    finish() {
+      window.clearInterval(timer);
+      finishFlowProgress(flowKey);
+    },
+    stop() {
+      window.clearInterval(timer);
+    },
+  };
+}
+
 async function runFetchPipeline() {
   const keyword = $("#keywordInput").value.trim();
   if (!keyword) {
@@ -411,37 +463,49 @@ async function runFetchPipeline() {
   $("#resultSourceBadge").textContent = "来源：关键词抓取";
   $("#resultComplianceBadge").textContent = "合规：生成阶段执行";
 
-  const ok = await runFlow("fetch");
-  if (!ok) return;
+  if (state.isRunning) return;
+  state.isRunning = true;
+  setButtonsDisabled(true);
+  const pacedProgress = startPacedProgress("fetch");
+  $("#flowDescription").textContent = "正在抓取候选文章，并执行筛选与价值评估。";
 
-  let fetchResult;
   try {
-    fetchResult = await fetchMaterialsFromBackend();
+    const fetchResult = await fetchMaterialsFromBackend();
+    $("#flowDescription").textContent = "抓取与评估完成，正在写入并刷新素材库。";
+
+    const newMaterials = fetchResult.materials;
+    if (newMaterials.length) {
+      state.materials = [...newMaterials, ...state.materials.filter((item) => !newMaterials.some((next) => next.id === item.id))];
+    }
+    await loadMaterialsFromBackend();
+    renderMaterialLists();
+    pacedProgress.showFinalRunning();
+    $("#flowDescription").textContent = "素材库已刷新，正在输出本次抓取摘要。";
+
+    const summary = fetchResult.summary || {};
+    $("#titleOutput").value = `已新增 ${summary.inserted ?? newMaterials.length} 篇待改写素材`;
+    $("#summaryOutput").value =
+      `关键词抓取已完成：抓到 ${summary.fetched ?? 0} 篇，通过 ${summary.passed ?? newMaterials.length} 篇，新增 ${summary.inserted ?? newMaterials.length} 篇，重复 ${summary.duplicates ?? 0} 篇，淘汰 ${summary.rejected ?? 0} 篇。`;
+    $("#tagOutput").innerHTML = newMaterials.length
+      ? newMaterials.map((item) => `<span>${item.shortTitle}</span>`).join("")
+      : "<span>暂无新增</span>";
+    $("#exportPreview").textContent = buildFetchSummary(fetchResult);
+
+    pacedProgress.finish();
+    setCompactTask("关键词抓取", "已完成");
+    $("#flowDescription").textContent = "关键词抓取已完成，结果已写入待改写素材。";
   } catch (error) {
+    pacedProgress.stop();
     $("#titleOutput").value = "抓取失败";
     $("#summaryOutput").value = error.message;
     $("#tagOutput").innerHTML = "<span>未入库</span>";
     $("#exportPreview").textContent = `# 关键词抓取失败\n\n${error.message}`;
     $("#flowDescription").textContent = `抓取失败：${error.message}`;
-    return;
+    setCompactTask("关键词抓取", "抓取失败");
+  } finally {
+    state.isRunning = false;
+    setButtonsDisabled(false);
   }
-
-  const newMaterials = fetchResult.materials;
-  if (newMaterials.length) {
-    state.materials = [...newMaterials, ...state.materials.filter((item) => !newMaterials.some((next) => next.id === item.id))];
-  }
-  await loadMaterialsFromBackend();
-  renderMaterialLists();
-  switchMaterialTab("todo");
-
-  const summary = fetchResult.summary || {};
-  $("#titleOutput").value = `已新增 ${summary.inserted ?? newMaterials.length} 篇待改写素材`;
-  $("#summaryOutput").value =
-    `关键词抓取已完成：抓到 ${summary.fetched ?? 0} 篇，通过 ${summary.passed ?? newMaterials.length} 篇，新增 ${summary.inserted ?? newMaterials.length} 篇，重复 ${summary.duplicates ?? 0} 篇，淘汰 ${summary.rejected ?? 0} 篇。`;
-  $("#tagOutput").innerHTML = newMaterials.length
-    ? newMaterials.map((item) => `<span>${item.shortTitle}</span>`).join("")
-    : "<span>暂无新增</span>";
-  $("#exportPreview").textContent = buildFetchSummary(fetchResult);
 }
 
 async function fetchMaterialsFromBackend() {
@@ -497,7 +561,7 @@ async function runLibraryPipelineConfirmed() {
   if (state.isRunning) return;
   state.isRunning = true;
   setButtonsDisabled(true);
-  setFlowProgress("library", "compliance", []);
+  const pacedProgress = startPacedProgress("library");
 
   try {
     const output = await createGeneratedOutputWithBackend({
@@ -505,17 +569,23 @@ async function runLibraryPipelineConfirmed() {
       sourceValue: material.title,
       material,
     }).catch((error) => handleGenerationBlocked(error));
-    if (!output) return;
-    setFlowProgress("library", "render", ["compliance", "rewrite", "split"]);
+    if (!output) {
+      pacedProgress.stop();
+      return;
+    }
     state.output = output;
     renderResult(output);
     const md2cardOk = await renderMd2CardForOutput(output);
-    if (!md2cardOk) return;
-    setFlowProgress("library", "output", ["compliance", "rewrite", "split", "render"]);
+    if (!md2cardOk) {
+      pacedProgress.stop();
+      return;
+    }
+    pacedProgress.showFinalRunning();
     $("#flowDescription").textContent = "卡片已生成，正在保存结果和更新素材状态。";
     await saveGenerationRecord(output, material.id);
     await markMaterialAsRewritten(material.id);
-    finishFlowProgress("library");
+    pacedProgress.finish();
+    $("#flowDescription").textContent = "卡片已生成，素材已进入待发布列表。";
   } finally {
     state.isRunning = false;
     setButtonsDisabled(false);
@@ -538,6 +608,43 @@ function closeUnreplacedLinkDialog() {
   if (dialog.open) dialog.close();
 }
 
+function confirmPublishMaterial(id, title = "") {
+  const dialog = $("#publishConfirmDialog");
+  dialog.dataset.materialId = id;
+  $("#publishConfirmTitle").textContent = title ? `确认 ${title} 已发布` : "确认已发布";
+  $("#publishConfirmText").textContent = "确认这篇素材已经发布了吗？确认后会进入“已发布”列表。";
+  if (typeof dialog.showModal === "function") {
+    dialog.showModal();
+    return;
+  }
+  if (window.confirm("确认这篇素材已经发布了吗？")) {
+    publishMaterial(id);
+  }
+}
+
+function closePublishConfirmDialog() {
+  const dialog = $("#publishConfirmDialog");
+  if (dialog.open) dialog.close();
+  delete dialog.dataset.materialId;
+}
+
+async function publishMaterial(id) {
+  try {
+    const data = await apiRequest("/api/materials/mark-published", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    });
+    state.materials = normalizeBackendMaterials(data.materials.todo || []);
+    state.pendingPublish = normalizeBackendMaterials(data.materials.pendingPublish || data.materials.rewritten || data.materials.todo || []);
+    state.published = normalizeBackendMaterials(data.materials.published || []);
+    if (state.selectedMaterialId === id) state.selectedMaterialId = null;
+    renderMaterialLists();
+    $("#flowDescription").textContent = "素材已进入已发布列表。";
+  } catch (error) {
+    alert(`发布失败：${error.message}`);
+  }
+}
+
 async function runInstantPipeline() {
   const instantValue = getInstantValue();
   if (!instantValue) {
@@ -557,25 +664,30 @@ async function runInstantPipeline() {
   if (state.isRunning) return;
   state.isRunning = true;
   setButtonsDisabled(true);
-  setFlowProgress("instant", "value", []);
+  const pacedProgress = startPacedProgress("instant");
 
   try {
     const output = await createGeneratedOutputWithBackend({
       sourceType: state.instantTab === "link" ? "文章链接" : "粘贴正文",
       sourceValue: instantValue,
     }).catch((error) => handleGenerationBlocked(error));
-    if (!output) return;
-    setFlowProgress("instant", "render", ["value", "compliance", "rewrite", "split"]);
+    if (!output) {
+      pacedProgress.stop();
+      return;
+    }
     state.output = output;
     renderResult(output);
     const md2cardOk = await renderMd2CardForOutput(output);
-    if (!md2cardOk) return;
-    setFlowProgress("instant", "output", ["value", "compliance", "rewrite", "split", "render"]);
+    if (!md2cardOk) {
+      pacedProgress.stop();
+      return;
+    }
+    pacedProgress.showFinalRunning();
     $("#flowDescription").textContent = "卡片已生成，正在保存即时生成历史。";
     await saveGenerationRecord(output);
     await loadMaterialsFromBackend({ silent: true });
-    finishFlowProgress("instant");
-    $("#flowDescription").textContent = "即时生成已保存到已改写素材，可在“已改写”中查看历史结果。";
+    pacedProgress.finish();
+    $("#flowDescription").textContent = "即时生成已保存，可在“待发布”和“已发布”中查看历史结果。";
   } finally {
     state.isRunning = false;
     setButtonsDisabled(false);
@@ -630,29 +742,39 @@ function resetOutput(message) {
 
 function renderMaterialLists() {
   const todo = $("#todoMaterialList");
-  const done = $("#doneMaterialList");
+  const pendingPublish = $("#pendingPublishMaterialList");
+  const published = $("#publishedMaterialList");
   const visibleMaterials = filterMaterials(state.materials);
-  const visibleRewritten = filterMaterials(state.rewritten);
+  const visiblePendingPublish = filterMaterials(state.pendingPublish);
+  const visiblePublished = filterMaterials(state.published);
   const todoPage = normalizePage("todo", visibleMaterials.length);
-  const donePage = normalizePage("done", visibleRewritten.length);
+  const pendingPublishPage = normalizePage("pendingPublish", visiblePendingPublish.length);
+  const publishedPage = normalizePage("published", visiblePublished.length);
   const todoItems = paginateItems(visibleMaterials, todoPage);
-  const doneItems = paginateItems(visibleRewritten, donePage);
+  const pendingPublishItems = paginateItems(visiblePendingPublish, pendingPublishPage);
+  const publishedItems = paginateItems(visiblePublished, publishedPage);
 
   todo.innerHTML = visibleMaterials.length
-    ? todoItems.map((item) => renderMaterialCard(item, false)).join("")
+    ? todoItems.map((item) => renderMaterialCard(item, "todo")).join("")
     : '<div class="empty-state compact">暂无匹配的待改写素材。可以调整筛选或执行关键词抓取。</div>';
 
-  done.innerHTML = visibleRewritten.length
-    ? doneItems.map((item) => renderMaterialCard(item, true)).join("")
-    : '<div class="empty-state compact">暂无匹配的已改写素材。</div>';
+  pendingPublish.innerHTML = visiblePendingPublish.length
+    ? pendingPublishItems.map((item) => renderMaterialCard(item, "pending_publish")).join("")
+    : '<div class="empty-state compact">暂无匹配的待发布素材。</div>';
+
+  published.innerHTML = visiblePublished.length
+    ? publishedItems.map((item) => renderMaterialCard(item, "published")).join("")
+    : '<div class="empty-state compact">暂无匹配的已发布素材。</div>';
 
   renderPagination("todoPagination", "todo", visibleMaterials.length, todoPage);
-  renderPagination("donePagination", "done", visibleRewritten.length, donePage);
+  renderPagination("pendingPublishPagination", "pendingPublish", visiblePendingPublish.length, pendingPublishPage);
+  renderPagination("publishedPagination", "published", visiblePublished.length, publishedPage);
 }
 
 function resetMaterialPages() {
   state.pages.todo = 1;
-  state.pages.done = 1;
+  state.pages.pendingPublish = 1;
+  state.pages.published = 1;
 }
 
 function normalizePage(type, total) {
@@ -683,7 +805,8 @@ function renderPagination(containerId, type, total, page) {
 }
 
 function changeMaterialPage(type, action) {
-  const source = type === "done" ? state.rewritten : state.materials;
+  const source =
+    type === "pendingPublish" ? state.pendingPublish : type === "published" ? state.published : state.materials;
   const total = filterMaterials(source).length;
   const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
   if (action === "prev") state.pages[type] = Math.max(1, state.pages[type] - 1);
@@ -709,22 +832,29 @@ function filterMaterials(items) {
   });
 }
 
-function renderMaterialCard(item, isDone) {
+function renderMaterialCard(item, status) {
+  const normalizedStatus = String(status || item.status || "todo");
   const selected = state.selectedMaterialId === item.id ? " selected" : "";
   const originalButton = item.url
     ? `<button class="tiny-button" data-view-original="${item.id}" type="button">查看原文</button>`
     : '<button class="tiny-button" type="button" disabled>暂无原文</button>';
   const replaceButtons =
-    !isDone && item.linkStatus === "未替换"
+    normalizedStatus === "todo" && item.linkStatus === "未替换"
       ? `<button class="tiny-button" data-auto-replace-link="${item.id}" type="button">自动替换</button>
          <button class="tiny-button" data-replace-link="${item.id}" type="button">手动替换</button>`
       : "";
-  const action = isDone
+  const action = normalizedStatus === "published"
     ? `<span class="material-primary-actions">
          ${originalButton}
          <button class="tiny-button primary" data-view-generation="${item.id}" type="button">查看结果</button>
        </span>
-       <span class="status-pill">已生成</span>`
+       <span class="status-pill success">已发布</span>`
+    : normalizedStatus === "pending_publish"
+      ? `<span class="material-primary-actions">
+           ${originalButton}
+           <button class="tiny-button primary" data-view-generation="${item.id}" type="button">查看结果</button>
+         </span>
+         <button class="tiny-button primary" data-publish-material="${item.id}" type="button">已发布</button>`
     : `<span class="material-primary-actions">
          ${originalButton}
          ${replaceButtons}
@@ -734,13 +864,15 @@ function renderMaterialCard(item, isDone) {
 
   return `
     <article class="material-card${selected}">
-      <h3 class="material-title">${isDone ? "❌" : ""}${item.title}</h3>
+      <h3 class="material-title">${item.title}</h3>
       <div class="material-meta">
         ${renderMetaTag(item.platform, "platform")}
         ${renderMetaTag(item.value, "value")}
         ${renderMetaTag(item.heat, "heat")}
         ${renderMetaTag(item.priority, "priority")}
         ${renderMetaTag(item.linkStatus, "link")}
+        ${normalizedStatus === "pending_publish" ? '<span class="meta-tag status pending">待发布</span>' : ""}
+        ${normalizedStatus === "published" ? '<span class="meta-tag status published">已发布</span>' : ""}
       </div>
       <div class="material-actions">${action}</div>
     </article>
@@ -767,7 +899,7 @@ function metaClass(text) {
 }
 
 function findMaterialById(id) {
-  return [...state.materials, ...state.rewritten].find((item) => item.id === id);
+  return [...state.materials, ...state.pendingPublish, ...state.published].find((item) => item.id === id);
 }
 
 function viewOriginal(id) {
@@ -780,7 +912,7 @@ async function loadGenerationForMaterial(id) {
   const material = findMaterialById(id);
   try {
     $("#flowDescription").textContent = "正在读取该素材的历史生成结果。";
-    setCompactTask(material?.title || "已改写素材", "读取结果");
+    setCompactTask(material?.title || "待发布素材", "读取结果");
 
     const data = await apiRequest(`/api/materials/latest-generation?id=${encodeURIComponent(id)}`);
     const output = generationToOutput(data.generation, material);
@@ -849,7 +981,7 @@ async function replaceMaterialLink(id) {
       body: JSON.stringify({ id, url: nextUrl }),
     });
     state.materials = normalizeBackendMaterials(data.materials.todo || []);
-    state.rewritten = normalizeBackendMaterials(data.materials.done || []);
+    state.pendingPublish = normalizeBackendMaterials(data.materials.pendingPublish || data.materials.rewritten || data.materials.todo || []);
     state.selectedMaterialId = data.material?.id || null;
     renderMaterialLists();
     $("#flowDescription").textContent = "链接已替换，素材状态已更新。";
@@ -866,7 +998,7 @@ async function autoReplaceMaterialLink(id) {
       body: JSON.stringify({ id }),
     });
     state.materials = normalizeBackendMaterials(data.materials.todo || []);
-    state.rewritten = normalizeBackendMaterials(data.materials.done || []);
+    state.pendingPublish = normalizeBackendMaterials(data.materials.pendingPublish || data.materials.rewritten || data.materials.todo || []);
     state.selectedMaterialId = data.material?.id || null;
     renderMaterialLists();
     $("#flowDescription").textContent = "已自动替换为永久链接。";
@@ -888,7 +1020,7 @@ async function deleteMaterial(id) {
       body: JSON.stringify({ id }),
     });
     state.materials = normalizeBackendMaterials(data.materials.todo || []);
-    state.rewritten = normalizeBackendMaterials(data.materials.done || []);
+    state.pendingPublish = normalizeBackendMaterials(data.materials.pendingPublish || data.materials.rewritten || data.materials.todo || []);
     if (state.selectedMaterialId === id) state.selectedMaterialId = null;
     renderMaterialLists();
     $("#flowDescription").textContent = "素材已删除，已从待改写列表移除。";
@@ -919,7 +1051,7 @@ async function markMaterialAsRewritten(id) {
       body: JSON.stringify({ id }),
     });
     state.materials = normalizeBackendMaterials(data.materials.todo || []);
-    state.rewritten = normalizeBackendMaterials(data.materials.done || []);
+    state.pendingPublish = normalizeBackendMaterials(data.materials.pendingPublish || data.materials.rewritten || data.materials.done || []);
     state.selectedMaterialId = null;
     renderMaterialLists();
     return;
@@ -930,7 +1062,7 @@ async function markMaterialAsRewritten(id) {
   const index = state.materials.findIndex((item) => item.id === id);
   if (index < 0) return;
   const [material] = state.materials.splice(index, 1);
-  state.rewritten = [{ ...material, rewrittenAt: new Date().toISOString() }, ...state.rewritten];
+  state.pendingPublish = [{ ...material, rewrittenAt: new Date().toISOString() }, ...state.pendingPublish];
   state.selectedMaterialId = null;
   renderMaterialLists();
 }
@@ -1052,6 +1184,7 @@ async function createGeneratedOutputWithBackend(params) {
       body: JSON.stringify({
         materialId: params.material?.id,
         sourceText: params.material ? params.material.title : params.sourceValue,
+        sourceTitle: params.material?.title || params.sourceTitle || "",
         sourceType: params.sourceType,
         domain,
         audience,
@@ -1062,7 +1195,11 @@ async function createGeneratedOutputWithBackend(params) {
       ? `，价值评估：${response.evaluation.valueLabel}${response.evaluation.heatLabel}`
       : "";
     $("#flowDescription").textContent = `已调用真实 AI 生成：${response.provider}${evaluationText}`;
-    return createGeneratedOutputFromAi(params, response.result, response.evaluation);
+    return createGeneratedOutputFromAi(
+      { ...params, sourceTitle: response.sourceTitle || params.sourceTitle || params.material?.title || "" },
+      response.result,
+      response.evaluation,
+    );
   } catch (error) {
     if (error.status === 422 && error.data?.evaluation) {
       throw error;
@@ -1081,6 +1218,12 @@ async function createGeneratedOutputWithBackend(params) {
     alert(message);
     return null;
   }
+}
+
+function getSourceTitleForOutput(params, aiResult) {
+  const sourceTitle = String(params.sourceTitle || params.material?.title || "").trim();
+  if (params.sourceType === "文章链接" && sourceTitle) return sourceTitle;
+  return String(aiResult.title || sourceTitle || params.sourceValue || "等待人工确认标题");
 }
 
 function createGeneratedOutputFromAi(params, aiResult, evaluation = null) {
@@ -1103,7 +1246,7 @@ function createGeneratedOutputFromAi(params, aiResult, evaluation = null) {
   const output = {
     sourceType: params.sourceType,
     sourceValue: params.sourceValue,
-    title: String(aiResult.title || "等待人工确认标题"),
+    title: getSourceTitleForOutput(params, aiResult),
     summary: String(aiResult.summary || ""),
     tags: Array.isArray(aiResult.tags) ? aiResult.tags.map(String).slice(0, 8) : [],
     cards: normalizedCards,
@@ -1132,7 +1275,7 @@ function createGeneratedOutput({ sourceType, sourceValue, material }) {
   const audience = getOptionalContext("audienceInput", "未指定，系统按素材自动判断");
   const sourceTitle = material?.title || sourceValue || "这篇内容";
   const shortSource = String(sourceTitle).replace(/^https?:\/\/\S+/i, "这篇文章").slice(0, 16);
-  const title = `${shortSource}怎么改`;
+  const title = shortSource || "这篇文章";
   const summary =
     audience.startsWith("未指定")
       ? "把素材拆成问题、方法、行动和提醒四层，先判断读者为什么需要，再改写成更适合图文卡片传播的内容。"

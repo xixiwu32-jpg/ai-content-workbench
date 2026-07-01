@@ -5,6 +5,7 @@ const { spawn } = require("child_process");
 const https = require("https");
 const httpClient = require("http");
 const crypto = require("crypto");
+const cheerio = require("cheerio");
 
 const PORT = Number(process.env.PORT || 5177);
 const ROOT = __dirname;
@@ -32,6 +33,40 @@ const HAS_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 const CLOUD_ID_PREFIX = "cloud:";
 const GENERATION_ID_PREFIX = "generation:";
 const MD2CARD_API_KEY = process.env.MD2CARD_API_KEY || "";
+const MATERIAL_STATUS = {
+  TODO: "todo",
+  PENDING_PUBLISH: "pending_publish",
+  PUBLISHED: "published",
+  ARCHIVED: "archived",
+  CANDIDATE: "candidate",
+  REWRITTEN: "rewritten",
+};
+
+function canonicalMaterialStatus(status) {
+  const normalized = String(status || "").trim();
+  if (!normalized) return MATERIAL_STATUS.TODO;
+  if (["todo", "待改写"].includes(normalized)) return MATERIAL_STATUS.TODO;
+  if (["pending_publish", "待发布", MATERIAL_STATUS.REWRITTEN].includes(normalized)) return MATERIAL_STATUS.PENDING_PUBLISH;
+  if (["published", "已发布"].includes(normalized)) return MATERIAL_STATUS.PUBLISHED;
+  if (["archived", "已归档"].includes(normalized)) return MATERIAL_STATUS.ARCHIVED;
+  if (["candidate", "候选"].includes(normalized)) return MATERIAL_STATUS.CANDIDATE;
+  return MATERIAL_STATUS.TODO;
+}
+
+function materialStatusLabel(status) {
+  switch (canonicalMaterialStatus(status)) {
+    case MATERIAL_STATUS.PENDING_PUBLISH:
+      return "待发布";
+    case MATERIAL_STATUS.PUBLISHED:
+      return "已发布";
+    case MATERIAL_STATUS.ARCHIVED:
+      return "已归档";
+    case MATERIAL_STATUS.CANDIDATE:
+      return "候选";
+    default:
+      return "待改写";
+  }
+}
 
 function loadEnvFile() {
   const envPath = path.join(ROOT, ".env");
@@ -102,8 +137,51 @@ function extractSectionValue(markdown, heading) {
   return "";
 }
 
+function replaceSectionValue(markdown, heading, value) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const sectionHeading = `## ${heading}`;
+  const index = lines.findIndex((line) => line.trim() === sectionHeading);
+  const normalizedValue = String(value || "").trim();
+
+  if (index < 0) {
+    const next = lines.slice();
+    if (next.length && next[next.length - 1].trim()) next.push("");
+    next.push(sectionHeading, normalizedValue);
+    return next.join("\n").trimEnd();
+  }
+
+  let valueIndex = -1;
+  let insertIndex = lines.length;
+  for (let i = index + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.startsWith("## ")) {
+      insertIndex = i;
+      break;
+    }
+    if (line && valueIndex < 0) valueIndex = i;
+  }
+
+  if (valueIndex >= 0) {
+    lines[valueIndex] = normalizedValue;
+    return lines.join("\n").trimEnd();
+  }
+
+  lines.splice(insertIndex, 0, normalizedValue);
+  return lines.join("\n").trimEnd();
+}
+
+function updateLocalReportStatus(reportMd, status, extra = {}) {
+  let next = replaceSectionValue(reportMd, "发布状态", status);
+  if (extra.rewrittenAt) {
+    next = replaceSectionValue(next, "改写时间", extra.rewrittenAt);
+  }
+  if (extra.publishedAt) {
+    next = replaceSectionValue(next, "发布时间", extra.publishedAt);
+  }
+  return next;
+}
+
 function parseFolderMeta(folderName) {
-  const done = folderName.startsWith("❌");
   const cleanName = folderName.replace(/^❌/, "");
   const [platform = "gzh", rest = cleanName] = cleanName.split("-", 2);
 
@@ -130,11 +208,11 @@ function parseFolderMeta(folderName) {
       : "未标注";
   const shortTitle = cleanName.replace(/^.*-\d+-/, "") || rest;
 
-  return { done, platform, value, heat, priority, linkStatus, shortTitle };
+  return { platform, value, heat, priority, linkStatus, shortTitle, legacyPending: folderName.startsWith("❌") };
 }
 
 function scanMaterials() {
-  if (!fs.existsSync(MATERIAL_OUTPUT_DIR)) return { todo: [], done: [] };
+  if (!fs.existsSync(MATERIAL_OUTPUT_DIR)) return { todo: [], pendingPublish: [], published: [] };
 
   const folders = fs
     .readdirSync(MATERIAL_OUTPUT_DIR, { withFileTypes: true })
@@ -146,6 +224,9 @@ function scanMaterials() {
       const reportPath = path.join(MATERIAL_OUTPUT_DIR, folderName, "report.md");
       const markdown = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, "utf-8") : "";
       const meta = parseFolderMeta(folderName);
+      const status = canonicalMaterialStatus(
+        extractSectionValue(markdown, "发布状态") || (meta.legacyPending ? MATERIAL_STATUS.PENDING_PUBLISH : MATERIAL_STATUS.TODO),
+      );
       const title = firstMarkdownTitle(markdown, meta.shortTitle);
       const url = extractSectionValue(markdown, "原文链接");
 
@@ -160,14 +241,15 @@ function scanMaterials() {
         priority: meta.priority,
         linkStatus: meta.linkStatus,
         shortTitle: meta.shortTitle,
-        done: meta.done,
+        status,
       };
     })
     .sort((a, b) => a.folderName.localeCompare(b.folderName, "zh-Hans-CN"));
 
   return {
-    todo: materials.filter((item) => !item.done),
-    done: materials.filter((item) => item.done),
+    todo: materials.filter((item) => item.status === MATERIAL_STATUS.TODO),
+    pendingPublish: materials.filter((item) => item.status === MATERIAL_STATUS.PENDING_PUBLISH),
+    published: materials.filter((item) => item.status === MATERIAL_STATUS.PUBLISHED),
   };
 }
 
@@ -193,6 +275,7 @@ function materialSourceKey(material) {
 function localMaterialToCloudPayload(material) {
   const reportPath = path.join(MATERIAL_OUTPUT_DIR, material.folderName, "report.md");
   const reportMd = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, "utf-8") : "";
+  const status = canonicalMaterialStatus(material.status || (material.done ? MATERIAL_STATUS.PENDING_PUBLISH : MATERIAL_STATUS.TODO));
 
   return {
     source_key: materialSourceKey(material),
@@ -204,11 +287,11 @@ function localMaterialToCloudPayload(material) {
     heat_label: material.heat || "未标注",
     priority_label: material.priority || "未标注",
     link_status: material.linkStatus || "未标注",
-    status: material.done ? "rewritten" : "todo",
+    status,
     folder_name: material.folderName,
     report_md: reportMd || null,
     raw: { importedFrom: "local-output" },
-    rewritten_at: material.done ? new Date().toISOString() : null,
+    rewritten_at: status === MATERIAL_STATUS.PENDING_PUBLISH || status === MATERIAL_STATUS.PUBLISHED ? new Date().toISOString() : null,
   };
 }
 
@@ -275,6 +358,7 @@ function fetchedArticleToMaterial(article, keyword = "", evaluation = null) {
 }
 
 function mapCloudMaterial(row) {
+  const status = canonicalMaterialStatus(row.status);
   return {
     id: `${CLOUD_ID_PREFIX}${row.id}`,
     cloudId: row.id,
@@ -288,8 +372,8 @@ function mapCloudMaterial(row) {
     priority: row.priority_label || "未标注",
     linkStatus: row.link_status || "未标注",
     shortTitle: row.short_title || row.title || "未命名素材",
-    done: row.status === "rewritten",
-    status: row.status || "todo",
+    done: status !== MATERIAL_STATUS.TODO,
+    status,
     storage: "cloud",
   };
 }
@@ -371,7 +455,7 @@ async function syncLocalMaterialsToCloud() {
   if (!HAS_SUPABASE) return;
 
   const local = scanMaterials();
-  const payloads = [...local.todo, ...local.done].map(localMaterialToCloudPayload);
+  const payloads = [...local.todo, ...local.pendingPublish, ...local.published].map(localMaterialToCloudPayload);
   if (payloads.length) await insertCloudMaterialsIfMissing(payloads);
 }
 
@@ -383,8 +467,9 @@ async function listCloudMaterials({ syncLocal = false } = {}) {
   });
   const materials = rows.map(mapCloudMaterial);
   return {
-    todo: materials.filter((item) => item.status === "todo"),
-    done: materials.filter((item) => item.status === "rewritten"),
+    todo: materials.filter((item) => item.status === MATERIAL_STATUS.TODO),
+    pendingPublish: materials.filter((item) => item.status === MATERIAL_STATUS.PENDING_PUBLISH),
+    published: materials.filter((item) => item.status === MATERIAL_STATUS.PUBLISHED),
   };
 }
 
@@ -396,7 +481,7 @@ async function getCloudMaterialsOrLocal() {
   try {
     const cloudMaterials = await listCloudMaterials({ syncLocal: false });
     const instantHistory = await listInstantGenerationHistory();
-    cloudMaterials.done = [...instantHistory, ...cloudMaterials.done];
+    cloudMaterials.published = [...instantHistory, ...cloudMaterials.published];
     return { ...cloudMaterials, storage: "cloud", cloud: { enabled: true, ok: true } };
   } catch (error) {
     return {
@@ -451,33 +536,64 @@ async function updateCloudMaterialLink(id, newUrl) {
   return mapCloudMaterial(updated[0]);
 }
 
-async function markCloudMaterialAsRewritten(id) {
+async function updateCloudMaterialStatus(id, status, extra = {}) {
   const cloudId = getCloudId(id);
   const updated = await supabaseRequest(`/materials?id=eq.${encodeURIComponent(cloudId)}`, {
     method: "PATCH",
     headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ status: "rewritten", rewritten_at: new Date().toISOString() }),
+    body: JSON.stringify({
+      status,
+      rewritten_at: extra.rewritten_at || null,
+      published_at: extra.published_at || null,
+      report_md: extra.report_md || undefined,
+    }),
   });
   if (!updated.length) throw new Error("Cloud material not found");
   return mapCloudMaterial(updated[0]);
 }
 
-function markLocalMaterialAsRewritten(id) {
+async function markCloudMaterialAsPendingPublish(id) {
+  return updateCloudMaterialStatus(id, MATERIAL_STATUS.PENDING_PUBLISH, {
+    rewritten_at: new Date().toISOString(),
+  });
+}
+
+async function markCloudMaterialAsPublished(id) {
+  return updateCloudMaterialStatus(id, MATERIAL_STATUS.PUBLISHED, {
+    published_at: new Date().toISOString(),
+  });
+}
+
+function updateLocalMaterialReportStatus(id, status, extra = {}) {
   const { folderName, folderPath } = getMaterialFolderPath(id);
-  if (folderName.startsWith("❌")) {
-    return { id: encodeURIComponent(folderName), folderName };
+  const reportPath = path.join(folderPath, "report.md");
+  if (!fs.existsSync(reportPath)) {
+    throw new Error("report.md not found");
   }
 
-  const nextFolderName = `❌${folderName}`;
-  const nextFolderPath = path.resolve(MATERIAL_OUTPUT_DIR, nextFolderName);
-  const rootWithSep = `${path.resolve(MATERIAL_OUTPUT_DIR)}${path.sep}`;
-  if (!nextFolderPath.startsWith(rootWithSep)) {
-    throw new Error("Target path is outside output directory");
-  }
-  if (!fs.existsSync(nextFolderPath)) {
-    fs.renameSync(folderPath, nextFolderPath);
-  }
-  return { id: encodeURIComponent(nextFolderName), folderName: nextFolderName };
+  const reportMd = fs.readFileSync(reportPath, "utf-8");
+  const nextReport = updateLocalReportStatus(reportMd, materialStatusLabel(status), {
+    rewrittenAt: extra.rewritten_at || extra.rewrittenAt,
+    publishedAt: extra.published_at || extra.publishedAt,
+  });
+  fs.writeFileSync(reportPath, `${nextReport.trimEnd()}\n`, "utf-8");
+  return {
+    id: encodeURIComponent(folderName),
+    folderName,
+    status: canonicalMaterialStatus(status),
+  };
+}
+
+function markLocalMaterialAsPendingPublish(id) {
+  return updateLocalMaterialReportStatus(id, MATERIAL_STATUS.PENDING_PUBLISH, {
+    rewritten_at: new Date().toISOString(),
+  });
+}
+
+function markLocalMaterialAsPublished(id) {
+  return updateLocalMaterialReportStatus(id, MATERIAL_STATUS.PUBLISHED, {
+    published_at: new Date().toISOString(),
+  });
 }
 
 async function createCloudGeneration(payload) {
@@ -573,7 +689,7 @@ function mapGenerationHistoryItem(row) {
     priority: dateLabel,
     linkStatus: "可回看",
     done: true,
-    status: "rewritten",
+    status: MATERIAL_STATUS.PUBLISHED,
     storage: "cloud",
     sourceType,
   };
@@ -1040,7 +1156,7 @@ function stripHtmlToText(html) {
     .trim();
 }
 
-async function fetchUrlAsText(targetUrl) {
+async function fetchUrlAsArticle(targetUrl) {
   const response = await fetch(targetUrl, {
     headers: {
       "User-Agent":
@@ -1049,7 +1165,17 @@ async function fetchUrlAsText(targetUrl) {
   });
   if (!response.ok) throw new Error(`URL fetch failed: ${response.status}`);
   const html = await response.text();
-  return stripHtmlToText(html).slice(0, 12000);
+  const $ = cheerio.load(html);
+  const title =
+    $('meta[property="og:title"]').attr("content") ||
+    $('meta[name="twitter:title"]').attr("content") ||
+    $("title").first().text() ||
+    "";
+  return {
+    title: String(title || "").trim(),
+    text: stripHtmlToText(html).slice(0, 12000),
+    url: response.url || targetUrl,
+  };
 }
 
 function inferTitleFromText(text) {
@@ -1492,7 +1618,28 @@ async function handleApi(req, res, url) {
         return true;
       }
 
-      const material = isCloudMaterialId(id) ? await markCloudMaterialAsRewritten(id) : markLocalMaterialAsRewritten(id);
+      const material = isCloudMaterialId(id)
+        ? await markCloudMaterialAsPendingPublish(id)
+        : markLocalMaterialAsPendingPublish(id);
+      sendJson(res, 200, { ok: true, material, materials: await getCloudMaterialsOrLocal() });
+    } catch (error) {
+      sendJson(res, 500, { error: error.message });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/materials/mark-published") {
+    try {
+      const body = await readRequestBody(req);
+      const id = String(body.id || "");
+      if (!id) {
+        sendJson(res, 400, { error: "id is required" });
+        return true;
+      }
+
+      const material = isCloudMaterialId(id)
+        ? await markCloudMaterialAsPublished(id)
+        : markLocalMaterialAsPublished(id);
       sendJson(res, 200, { ok: true, material, materials: await getCloudMaterialsOrLocal() });
     } catch (error) {
       sendJson(res, 500, { error: error.message });
@@ -1566,6 +1713,7 @@ async function handleApi(req, res, url) {
       const body = await readRequestBody(req);
       let sourceText = String(body.sourceText || "").trim();
       const originalSource = sourceText;
+      let sourceTitle = String(body.sourceTitle || "").trim();
 
       if (body.materialId) {
         sourceText = await getMaterialSourceText(String(body.materialId));
@@ -1579,11 +1727,13 @@ async function handleApi(req, res, url) {
       let evaluation = null;
       if (!body.materialId) {
         if (looksLikeUrl(sourceText)) {
-          sourceText = await fetchUrlAsText(sourceText);
+          const fetched = await fetchUrlAsArticle(sourceText);
+          sourceText = fetched.text;
+          sourceTitle = sourceTitle || fetched.title || "";
         }
 
         const articleForEvaluation = {
-          title: inferTitleFromText(sourceText),
+          title: sourceTitle || inferTitleFromText(sourceText),
           summary: sourceText,
           url: looksLikeUrl(originalSource) ? originalSource : "",
           source_text: sourceText,
@@ -1609,7 +1759,13 @@ async function handleApi(req, res, url) {
         audience: String(body.audience || "").trim(),
         pageCount: String(body.pageCount || "").trim(),
       });
-      sendJson(res, 200, { ok: true, provider: result.provider, result: result.data, evaluation });
+      sendJson(res, 200, {
+        ok: true,
+        provider: result.provider,
+        result: result.data,
+        evaluation,
+        sourceTitle: sourceTitle || result.data?.title || inferTitleFromText(sourceText),
+      });
     } catch (error) {
       sendJson(res, 500, { error: error.message });
     }
@@ -1635,7 +1791,10 @@ function serveStatic(req, res, url) {
 
   const ext = path.extname(filePath).toLowerCase();
   const contentType = MIME_TYPES[ext] || "application/octet-stream";
-  res.writeHead(200, { "Content-Type": contentType });
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Cache-Control": "no-store, max-age=0",
+  });
   fs.createReadStream(filePath).pipe(res);
 }
 

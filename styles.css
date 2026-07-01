@@ -386,6 +386,16 @@ textarea {
   color: #15803d;
 }
 
+.material-meta .meta-tag.pending {
+  background: #fff7e6;
+  color: #b45309;
+}
+
+.material-meta .meta-tag.published {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
 .material-actions {
   display: flex;
   flex-wrap: wrap;
@@ -443,6 +453,11 @@ textarea {
   padding: 0 10px;
   font-size: 12px;
   font-weight: 900;
+}
+
+.status-pill.success {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .pagination {

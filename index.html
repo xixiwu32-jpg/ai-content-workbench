@@ -93,7 +93,8 @@
 
             <div class="segmented material-tabs" role="tablist" aria-label="素材中心">
               <button class="segment active" data-material-tab="todo" type="button">待改写</button>
-              <button class="segment" data-material-tab="done" type="button">已改写</button>
+              <button class="segment" data-material-tab="pendingPublish" type="button">待发布</button>
+              <button class="segment" data-material-tab="published" type="button">已发布</button>
               <button class="segment" data-material-tab="fetch" type="button">关键词抓取</button>
               <button class="segment" data-material-tab="instant" type="button">即时输入</button>
             </div>
@@ -114,11 +115,18 @@
               <div class="pagination" id="todoPagination"></div>
             </div>
 
-            <div class="material-pane" data-material-pane="done">
-              <div class="material-list" id="doneMaterialList">
-                <div class="empty-state compact">暂无已改写素材。生成卡片后会自动归入这里。</div>
+            <div class="material-pane" data-material-pane="pendingPublish">
+              <div class="material-list" id="pendingPublishMaterialList">
+                <div class="empty-state compact">暂无待发布素材。生成卡片后会自动归入这里。</div>
               </div>
-              <div class="pagination" id="donePagination"></div>
+              <div class="pagination" id="pendingPublishPagination"></div>
+            </div>
+
+            <div class="material-pane" data-material-pane="published">
+              <div class="material-list" id="publishedMaterialList">
+                <div class="empty-state compact">暂无已发布素材。确认发布后会自动归入这里。</div>
+              </div>
+              <div class="pagination" id="publishedPagination"></div>
             </div>
 
             <div class="material-pane" data-material-pane="fetch">
@@ -252,6 +260,15 @@
         <button class="ghost-button" id="cancelUnreplacedButton" type="button">取消</button>
         <button class="ghost-button" id="manualReplaceFromDialogButton" type="button">手动替换</button>
         <button class="primary-button" id="continueUnreplacedButton" type="button">继续生成</button>
+      </div>
+    </dialog>
+
+    <dialog class="confirm-dialog" id="publishConfirmDialog">
+      <h3 id="publishConfirmTitle">确认已发布</h3>
+      <p id="publishConfirmText">确认这篇素材已经发布了吗？确认后会进入“已发布”列表。</p>
+      <div class="dialog-actions">
+        <button class="ghost-button" id="cancelPublishButton" type="button">取消</button>
+        <button class="primary-button" id="confirmPublishButton" type="button">确认发布</button>
       </div>
     </dialog>
 
