@@ -1426,7 +1426,7 @@ async function callMd2CardApi({ markdown, theme }) {
     theme,
     width: 440,
     height: 586,
-    splitMode: "noSplit",
+    splitMode: "autoSplit",
     mdxMode: false,
     overHiddenMode: false,
   };
