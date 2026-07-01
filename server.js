@@ -276,6 +276,7 @@ function localMaterialToCloudPayload(material) {
   const reportPath = path.join(MATERIAL_OUTPUT_DIR, material.folderName, "report.md");
   const reportMd = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, "utf-8") : "";
   const status = canonicalMaterialStatus(material.status || (material.done ? MATERIAL_STATUS.PENDING_PUBLISH : MATERIAL_STATUS.TODO));
+  const cloudStatus = cloudWritableMaterialStatus(status);
 
   return {
     source_key: materialSourceKey(material),
@@ -287,10 +288,13 @@ function localMaterialToCloudPayload(material) {
     heat_label: material.heat || "未标注",
     priority_label: material.priority || "未标注",
     link_status: material.linkStatus || "未标注",
-    status,
+    status: cloudStatus,
     folder_name: material.folderName,
     report_md: reportMd || null,
-    raw: { importedFrom: "local-output" },
+    raw: {
+      importedFrom: "local-output",
+      publish_status: status === MATERIAL_STATUS.PUBLISHED ? MATERIAL_STATUS.PUBLISHED : undefined,
+    },
     rewritten_at: status === MATERIAL_STATUS.PENDING_PUBLISH || status === MATERIAL_STATUS.PUBLISHED ? new Date().toISOString() : null,
   };
 }
@@ -357,8 +361,25 @@ function fetchedArticleToMaterial(article, keyword = "", evaluation = null) {
   };
 }
 
-function mapCloudMaterial(row) {
+function cloudWritableMaterialStatus(status) {
+  const normalized = canonicalMaterialStatus(status);
+  if (normalized === MATERIAL_STATUS.PENDING_PUBLISH || normalized === MATERIAL_STATUS.PUBLISHED) {
+    return MATERIAL_STATUS.REWRITTEN;
+  }
+  return normalized;
+}
+
+function publicMaterialStatusFromCloudRow(row) {
+  const raw = row.raw && typeof row.raw === "object" ? row.raw : {};
   const status = canonicalMaterialStatus(row.status);
+  if (status === MATERIAL_STATUS.PENDING_PUBLISH && raw.publish_status === MATERIAL_STATUS.PUBLISHED) {
+    return MATERIAL_STATUS.PUBLISHED;
+  }
+  return status;
+}
+
+function mapCloudMaterial(row) {
+  const status = publicMaterialStatusFromCloudRow(row);
   return {
     id: `${CLOUD_ID_PREFIX}${row.id}`,
     cloudId: row.id,
@@ -538,13 +559,25 @@ async function updateCloudMaterialLink(id, newUrl) {
 
 async function updateCloudMaterialStatus(id, status, extra = {}) {
   const cloudId = getCloudId(id);
+  const publicStatus = canonicalMaterialStatus(status);
+  const row = await getCloudMaterialRow(id);
+  const raw = row.raw && typeof row.raw === "object" ? row.raw : {};
+  const nextRaw = { ...raw };
+  if (publicStatus === MATERIAL_STATUS.PUBLISHED) {
+    nextRaw.publish_status = MATERIAL_STATUS.PUBLISHED;
+    nextRaw.published_at = extra.published_at || new Date().toISOString();
+  } else {
+    delete nextRaw.publish_status;
+    delete nextRaw.published_at;
+  }
+
   const updated = await supabaseRequest(`/materials?id=eq.${encodeURIComponent(cloudId)}`, {
     method: "PATCH",
     headers: { Prefer: "return=representation" },
     body: JSON.stringify({
-      status,
-      rewritten_at: extra.rewritten_at || null,
-      published_at: extra.published_at || null,
+      status: cloudWritableMaterialStatus(publicStatus),
+      rewritten_at: extra.rewritten_at || row.rewritten_at || null,
+      raw: nextRaw,
       report_md: extra.report_md || undefined,
     }),
   });
