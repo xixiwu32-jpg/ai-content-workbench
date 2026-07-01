@@ -1245,6 +1245,7 @@ function buildGenerationPrompt(payload) {
 - 第 2 页 label 使用“认知对齐”：交代背景、痛点或核心判断，让读者知道为什么要继续看。
 - 第 3 页至倒数第 2 页：作为核心干货页，每页承载 1-2 个论点、步骤或方法，使用小标题 + 结构化正文。
 - 最后 1 页 label 使用“总结”：收束全文，给出行动提醒、方法复盘或判断边界。
+- label 只是系统内部元数据，严禁把“封面 / 认知对齐 / 核心干货 / 总结”等 label 文字写入 title 或 body。
 - 每页 body 尽量使用短段落、列表、加粗重点或 emoji 增加阅读节奏。
 - 内容完整优先，不要遗漏原文中的关键论点、数据、步骤和方法。
 - 严禁出现“点赞/收藏/关注/评论区见”等互动引导语。
@@ -1358,8 +1359,7 @@ const MD2CARD_THEME_MAP = {
 };
 
 function buildCardMarkdown(card) {
-  const label = card.label ? `> ${card.label}` : "";
-  return [`# ${card.title || `第 ${card.page || 1} 页`}`, label, card.body || ""].filter(Boolean).join("\n\n");
+  return [`# ${card.title || `第 ${card.page || 1} 页`}`, card.body || ""].filter(Boolean).join("\n\n");
 }
 
 function normalizeMd2CardImages(data) {
